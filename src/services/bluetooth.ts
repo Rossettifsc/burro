@@ -1,59 +1,201 @@
-import { BleClient, dataViewToText, textToDataView } from '@capacitor-community/bluetooth-le';
+import { BluetoothLowEnergy } from '@capgo/capacitor-bluetooth-low-energy';
 import type { BluetoothMessage } from '../types/game';
-import { validateMessage } from './gameEngine';
 
-// Gere UUIDs próprios para o projeto. O mesmo conjunto deve existir em todos os celulares.
 export const SERVICE_UUID = '7d8a0001-7b12-4f6a-9c2d-00805f9b34fb';
-export const CHARACTERISTIC_UUID = '7d8a0002-7b12-4f6a-9c2d-00805f9b34fb';
+export const MESSAGE_CHARACTERISTIC_UUID =
+  '7d8a0002-7b12-4f6a-9c2d-00805f9b34fb';
 
-export async function initializeBluetooth(): Promise<void> {
-  await BleClient.initialize();
+const characteristicProperties = {
+  read: true,
+  write: true,
+  writeWithoutResponse: true,
+  notify: true,
+  broadcast: false,
+  indicate: false,
+  authenticatedSignedWrites: false,
+  extendedProperties: false,
+};
+
+function textToBytes(text: string): number[] {
+  return Array.from(new TextEncoder().encode(text));
 }
 
-export async function requestBluetoothPermissions(): Promise<void> {
-  // O plugin solicita as permissões durante initialize/scan/connect conforme Android/iOS.
-  // Esta função existe para centralizar o fluxo da aplicação.
-  await initializeBluetooth();
+function bytesToText(bytes: number[]): string {
+  return new TextDecoder().decode(new Uint8Array(bytes));
 }
 
-export async function scanNearbyDevices(timeoutMs = 8000): Promise<any[]> {
-  const devices: any[] = [];
-  await BleClient.requestLEScan(
-    { services: [SERVICE_UUID] },
-    (result) => {
-      if (!devices.some((device) => device.deviceId === result.device.deviceId)) {
-        devices.push(result.device);
-      }
-    },
-  );
-  await new Promise((resolve) => setTimeout(resolve, timeoutMs));
-  await BleClient.stopLEScan();
-  return devices;
+export async function initializeCentral(): Promise<void> {
+  await BluetoothLowEnergy.initialize({
+    mode: 'central',
+  });
+
+  await BluetoothLowEnergy.requestPermissions();
 }
 
-export async function connectToDevice(deviceId: string): Promise<void> {
-  await BleClient.connect(deviceId);
+export async function initializePeripheral(): Promise<void> {
+  await BluetoothLowEnergy.initialize({
+    mode: 'peripheral',
+  });
+
+  await BluetoothLowEnergy.requestPermissions();
 }
 
-export async function sendMessage<T>(deviceId: string, message: BluetoothMessage<T>): Promise<void> {
-  const serialized = JSON.stringify(message);
-  await BleClient.write(deviceId, SERVICE_UUID, CHARACTERISTIC_UUID, textToDataView(serialized));
-}
-
-export async function listenMessages<T>(
-  deviceId: string,
-  callback: (message: BluetoothMessage<T>) => void,
+export async function startHostAdvertising(
+  gameName: string,
 ): Promise<void> {
-  await BleClient.startNotifications(deviceId, SERVICE_UUID, CHARACTERISTIC_UUID, (value) => {
-    try {
-      const parsed = JSON.parse(dataViewToText(value));
-      if (validateMessage(parsed)) callback(parsed as BluetoothMessage<T>);
-    } catch {
-      console.warn('Mensagem Bluetooth ignorada: JSON inválido.');
-    }
+  await initializePeripheral();
+
+  await BluetoothLowEnergy.addGattService({
+    service: SERVICE_UUID,
+    characteristics: [
+      {
+        uuid: MESSAGE_CHARACTERISTIC_UUID,
+        properties: characteristicProperties,
+        value: [0],
+      },
+    ],
+  });
+
+  await BluetoothLowEnergy.startAdvertising({
+    name: gameName,
+    services: [SERVICE_UUID],
+    includeName: true,
+    includeTxPowerLevel: true,
   });
 }
 
-export async function disconnectDevice(deviceId: string): Promise<void> {
-  await BleClient.disconnect(deviceId);
+export async function stopHostAdvertising(): Promise<void> {
+  await BluetoothLowEnergy.stopAdvertising();
+}
+
+export async function scanForRooms(
+  onDeviceFound: (device: any) => void,
+): Promise<void> {
+  await initializeCentral();
+
+  await BluetoothLowEnergy.addListener(
+    'deviceScanned',
+    (event) => {
+      const device = event.device;
+
+      if (device.serviceUuids?.includes(SERVICE_UUID)) {
+        onDeviceFound(device);
+      }
+    },
+  );
+
+  await BluetoothLowEnergy.startScan({
+    services: [SERVICE_UUID],
+    timeout: 10000,
+    allowDuplicates: false,
+  });
+}
+
+export async function stopScanning(): Promise<void> {
+  await BluetoothLowEnergy.stopScan();
+}
+
+export async function connectToHost(deviceId: string): Promise<void> {
+  await BluetoothLowEnergy.connect({
+    deviceId,
+  });
+
+  await BluetoothLowEnergy.discoverServices({
+    deviceId,
+  });
+}
+
+export async function sendMessageToHost<T>(
+  deviceId: string,
+  message: BluetoothMessage<T>,
+): Promise<void> {
+  const bytes = textToBytes(JSON.stringify(message));
+
+  await BluetoothLowEnergy.writeCharacteristic({
+    deviceId,
+    service: SERVICE_UUID,
+    characteristic: MESSAGE_CHARACTERISTIC_UUID,
+    value: bytes,
+    type: 'withResponse',
+  });
+}
+
+export async function listenToHostMessages(
+  deviceId: string,
+  onMessage: (message: BluetoothMessage) => void,
+): Promise<void> {
+  await BluetoothLowEnergy.addListener(
+    'characteristicChanged',
+    (event) => {
+      if (
+        event.deviceId !== deviceId ||
+        event.service !== SERVICE_UUID ||
+        event.characteristic !== MESSAGE_CHARACTERISTIC_UUID
+      ) {
+        return;
+      }
+
+      try {
+        const message = JSON.parse(bytesToText(event.value));
+        onMessage(message);
+      } catch {
+        console.warn('Mensagem Bluetooth inválida.');
+      }
+    },
+  );
+
+  await BluetoothLowEnergy.startCharacteristicNotifications({
+    deviceId,
+    service: SERVICE_UUID,
+    characteristic: MESSAGE_CHARACTERISTIC_UUID,
+  });
+}
+
+export async function listenToHostRequests(
+  onRequest: (
+    centralDeviceId: string,
+    message: BluetoothMessage,
+  ) => void,
+): Promise<void> {
+  await BluetoothLowEnergy.addListener(
+    'gattCharacteristicWriteRequest',
+    (event) => {
+      if (
+        event.service !== SERVICE_UUID ||
+        event.characteristic !== MESSAGE_CHARACTERISTIC_UUID
+      ) {
+        return;
+      }
+
+      try {
+        const message = JSON.parse(bytesToText(event.value));
+
+        onRequest(event.deviceId, message);
+      } catch {
+        console.warn('Solicitação Bluetooth inválida.');
+      }
+    },
+  );
+}
+
+export async function notifyPlayers<T>(
+  message: BluetoothMessage<T>,
+  deviceId?: string,
+): Promise<void> {
+  const bytes = textToBytes(JSON.stringify(message));
+
+  await BluetoothLowEnergy.notifyGattCharacteristicChanged({
+    service: SERVICE_UUID,
+    characteristic: MESSAGE_CHARACTERISTIC_UUID,
+    value: bytes,
+    deviceId,
+  });
+}
+
+export async function disconnectFromHost(
+  deviceId: string,
+): Promise<void> {
+  await BluetoothLowEnergy.disconnect({
+    deviceId,
+  });
 }
