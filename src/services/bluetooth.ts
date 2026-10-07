@@ -5,6 +5,12 @@ export const SERVICE_UUID = '7d8a0001-7b12-4f6a-9c2d-00805f9b34fb';
 export const MESSAGE_CHARACTERISTIC_UUID =
   '7d8a0002-7b12-4f6a-9c2d-00805f9b34fb';
 
+export interface NearbyBluetoothDevice {
+  deviceId: string;
+  name: string | null;
+  serviceUuids: string[];
+}
+
 const characteristicProperties = {
   read: true,
   write: true,
@@ -29,7 +35,7 @@ export async function initializeCentral(): Promise<void> {
     mode: 'central',
   });
 
-  await BluetoothLowEnergy.requestPermissions();
+  await requestBluetoothPermissions();
 }
 
 export async function initializePeripheral(): Promise<void> {
@@ -37,7 +43,21 @@ export async function initializePeripheral(): Promise<void> {
     mode: 'peripheral',
   });
 
-  await BluetoothLowEnergy.requestPermissions();
+  await requestBluetoothPermissions();
+}
+
+export async function requestBluetoothPermissions(): Promise<void> {
+  const permissions = await BluetoothLowEnergy.requestPermissions();
+
+  if (permissions.bluetooth !== 'granted') {
+    throw new Error('Permita o acesso ao Bluetooth para continuar.');
+  }
+
+  const { enabled } = await BluetoothLowEnergy.isEnabled();
+
+  if (!enabled) {
+    throw new Error('Ative o Bluetooth nas configurações rápidas do Android.');
+  }
 }
 
 export async function startHostAdvertising(
@@ -69,7 +89,7 @@ export async function stopHostAdvertising(): Promise<void> {
 }
 
 export async function scanForRooms(
-  onDeviceFound: (device: any) => void,
+  onDeviceFound: (device: NearbyBluetoothDevice) => void,
 ): Promise<void> {
   await initializeCentral();
 
